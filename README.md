@@ -12,3 +12,7 @@ python3 main.py
 Which generates the following output:
 
 ![OUTOUT](https://github.com/dynexcoin/mode_assisted_unsupervised_learning/blob/main/output.jpg)
+
+
+### References
+[Mode-assisted unsupervised learning of restricted Boltzmann machines](https://arxiv.org/pdf/2001.05559.pdf), Communications Physics volume 3, Article number:105 (2020)
