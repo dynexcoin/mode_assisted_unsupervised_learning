@@ -11,7 +11,7 @@ python3 main.py
 
 Which generates the following output:
 
-![OUTOUT](https://github.com/dynexcoin/mode_assisted_unsupervised_learning/blob/main/output.jpg)
+![OUTOUT](https://github.com/dynexcoin/mode_assisted_unsupervised_learning/blob/main/output.png)
 
 
 ### References
