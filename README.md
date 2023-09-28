@@ -13,9 +13,9 @@ Which generates the following output:
 
 ![OUTOUT](https://github.com/dynexcoin/mode_assisted_unsupervised_learning/blob/main/output.png)
 
-# PyTorch Class
+# Mode-Assisted QRBM as Python Class
 
-Which generates the following output:
+Can be universally used. MNIST trainging comparison of CD-1 vs. Mode-Assisted: 
 
 ![Figure_8](https://github.com/dynexcoin/mode_assisted_unsupervised_learning/blob/main/Figure_8.jpg))
 
