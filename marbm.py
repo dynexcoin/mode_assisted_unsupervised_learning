@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import dimod
 from tqdm import tqdm
@@ -47,31 +48,54 @@ class MARBM(nn.Module):
     - _cd_train_step: Execute one step of training using Contrastive Divergence.
     
     """
+    
     def __init__(self, visible_units: int, hidden_units: int):
         """
-        Initializes the Mode-Assisted Restricted Boltzmann Machine (RBM).
-        
+        Initializes the Mode-Assisted Restricted Boltzmann Machine (MARBM).
+
         Parameters:
         ----------
         visible_units : int
-            The number of visible units. Must be a positive integer.
+            Number of visible units. Represents the dimensionality of the data input.
+            Must be a positive integer.
+
         hidden_units : int
-            The number of hidden units. Must be a positive integer.
-            
+            Number of hidden units. Represents the latent dimensionality or feature detectors.
+            Must be a positive integer.
+
         Attributes:
         -----------
         visible_units : int
-            The number of visible units in the RBM.
+            Number of visible units in the RBM. Represents the data input's dimensionality.
+
         hidden_units : int
-            The number of hidden units in the RBM.
+            Number of hidden units in the RBM. Represents the latent features or representations.
+
         W : torch.nn.Parameter
-            Weight matrix initialized with random values.
+            Weight matrix, connecting visible to hidden units. It's initialized with small random values
+            to break the symmetry during training.
+
         h_bias : torch.nn.Parameter
-            Bias vector for hidden units, initialized to zeros.
+            Bias vector for the hidden units. Initialized to zeros.
+
         v_bias : torch.nn.Parameter
-            Bias vector for visible units, initialized to zeros.
-        metrics : list
-            A list to store (loss) metrics during training.
+            Bias vector for the visible units. Initialized to zeros.
+
+        metrics_name : str
+            Name of the metric(s) used during training. Useful for visualization and interpretation.
+
+        metrics_values : list
+            List storing metric values collected during training for visualization.
+
+        sigm_values : list
+            List storing sigmoid values collected during training for understanding the switching dynamics.
+
+        Notes:
+        ------
+        The MARBM class represents a Mode-Assisted Restricted Boltzmann Machine, which is an
+        unsupervised neural network model for learning representations. This class specifically 
+        includes provisions for capturing and visualizing training dynamics, which aids in 
+        interpreting the training process.
         """
         # Call the constructor of the parent class (nn.Module)
         super(MARBM, self).__init__()
@@ -92,8 +116,10 @@ class MARBM(nn.Module):
         self.h_bias = nn.Parameter(torch.zeros(hidden_units))
         self.v_bias = nn.Parameter(torch.zeros(visible_units))
         
-        # Initialize the list to store (loss) metrics
-        self.metrics = []
+        # Store data for visualization
+        self.metrics_name = ''
+        self.metrics_values  = []
+        self.sigm_values = []
 
         # Log the initialization details
         logger.info("Initialized MARBM with visible units: %s, hidden units: %s", visible_units, hidden_units)
@@ -284,7 +310,7 @@ class MARBM(nn.Module):
         binary_data = (data > threshold).float()
         return binary_data  
         
-    def train(self, train_loader, val_loader=None, epochs=10, lr=0.01, k=1, sigm_a=20, sigm_b=-6, p_max=0.1, plotper=100, loss_metric='free_energy'):
+    def train(self, train_loader, val_loader=None, epochs=10, lr=0.01, k=1, sigm_a=20, sigm_b=-6, p_max=0.1, plotper=100, loss_metric='free_energy', save_model_per_epoch=False, save_path='./saved_models'):
         """
         Trains the MARBM model on provided data using the specified parameters.
 
@@ -298,8 +324,10 @@ class MARBM(nn.Module):
         - sigm_b (float, optional): Bias for the sigmoidal function determining mode switching. Default is -6.
         - p_max (float, optional): Upper limit for the probability of the sigmoidal switch function. Must be within (0, 1]. Default is 0.1.
         - plotper (int, optional): Frequency for calculating and logging the free energy. Default is 100.
-        - loss_metric (str, optional): Metric for loss computation. Accepts 'free_energy' or 'kl_loss'. Default is 'free_energy'.
-
+        - loss_metric (str, optional): Metric for loss computation. Accepts 'free_energy', 'kl' or 'mse'. Default is 'free_energy'.
+        - save_model_per_epoch (bool, optional): If True, the model will be saved after every epoch. Default is False.
+        - save_path (str, optional): Path to the directory where models should be saved. Used only if save_model_per_epoch is True. Default is './saved_models'.
+        
         Notes:
         Training alternates between mode-based training and contrastive divergence based on stochastic switching. 
         The probability of selecting mode-based training at each step is given by the sigmoid function 
@@ -310,6 +338,10 @@ class MARBM(nn.Module):
         Free energy or KL loss is periodically computed and stored based on the `plotper` interval.
         
         """
+        
+        self.metrics_name = loss_metric
+        self.metrics_values  = []
+        self.sigm_values = []
         
         lr = float(lr)
         sigm_a = float(sigm_a)
@@ -325,7 +357,8 @@ class MARBM(nn.Module):
         assert isinstance(sigm_b, float), "sigm_b should be a float"
         assert isinstance(p_max, float) and 0 <= p_max <= 1, "p_max should be a float in the range (0, 1]"
         assert isinstance(plotper, int) and plotper > 0, "plotper should be a positive integer"
-        assert isinstance(loss_metric, str) and loss_metric in ['free_energy', 'kl_loss'], "loss_metric should be a string and either 'free_energy' or 'kl_loss'"
+        assert isinstance(loss_metric, str) and loss_metric in ['free_energy', 'kl', 'mse'], "loss_metric should be a string and one of ['free_energy', 'kl', 'mse']"
+
         
         optimizer = torch.optim.SGD(self.parameters(), lr=lr)
 
@@ -347,8 +380,19 @@ class MARBM(nn.Module):
                 
                 # Calculate metric every 'plotper' steps
                 if iter_idx % plotper == 0:
-                    self.compute_and_log_metric(val_loader, data, loss_metric)
-
+                    self.compute_and_log_metric(val_loader, data, loss_metric, sigm)
+                    
+            logger.info(f"{self.metrics_name}: {self.metrics_values[-1]}") 
+            print(f"{self.metrics_name}: {self.metrics_values[-1]}")
+            
+            # Saving the model after each epoch if specified
+            if save_model_per_epoch:
+                if not os.path.exists(save_path):
+                    os.makedirs(save_path)
+                model_save_path = os.path.join(save_path, f'marbm_epoch_{epoch+1}.pth')
+                self.save_model(model_save_path)
+                logger.info(f"Model saved at {model_save_path} after epoch {epoch+1}")
+                
         logger.info("Training completed")
         
     def _mode_sampling(self):
@@ -361,7 +405,7 @@ class MARBM(nn.Module):
         - ground_state_energy (float): Energy of the sampled ground state.
         """
         Q = self.rbm2qubo()
-        # bqm = dimod.BinaryQuadraticModel.from_qubo(Q, offset)
+        # bqm = dimod.BinaryQuadraticModel.from_qubo(Q, offset=0.0)
         simulated_annealing_parameters = {
             'beta_range': [0.1, 1.0],
             'num_reads': 2,
@@ -506,8 +550,24 @@ class MARBM(nn.Module):
         """
         reconstructed_data_probabilities = self.reconstruct(data)
         return self.kl_divergence(data, reconstructed_data_probabilities)
-    
-    def compute_and_log_metric(self, val_loader, data, loss_metric):
+        
+    def compute_mse(self, data: torch.Tensor) -> torch.Tensor:
+        """
+        Compute the Mean Squared Error (MSE) between the original data and its reconstruction.
+
+        Parameters:
+        ----------
+        data (torch.Tensor): Original input data, of shape [batch_size, visible_units].
+
+        Returns:
+        -------
+        torch.Tensor: Mean Squared Error between the original data and its reconstruction.
+        """
+        reconstructed_data = self.reconstruct(data)
+        mse_loss = torch.nn.functional.mse_loss(reconstructed_data, data, reduction='mean')
+        return mse_loss
+
+    def compute_and_log_metric(self, val_loader, data, loss_metric, sigm):
         """
         Computes and logs the specified metric using provided data.
         
@@ -530,10 +590,14 @@ class MARBM(nn.Module):
                 metric_value = self.compute_free_energy(data_for_metric).mean().item()
             elif loss_metric == 'kl_loss':
                 metric_value = self.compute_kl_divergence(data_for_metric).mean().item()
+            elif loss_metric == 'mse':
+                metric_value = self.compute_mse(data_for_metric).item()
+
             else:
                 raise ValueError(f"Invalid loss_metric: {loss_metric}. Expected 'free_energy' or 'kl_loss'.")
             
-            self.metrics.append(metric_value)
+            self.metrics_values.append(metric_value)
+            self.sigm_values.append(sigm)
             
     def kl_divergence(self, p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
         """
@@ -565,14 +629,14 @@ class MARBM(nn.Module):
     def save_model(self, path):
         """
         Save the trained weights and biases of the RBM.
-        
+
         Parameters:
             - path (str): Path to save the model's state.
         """
         torch.save({
-            'W': self.W.state_dict(),
-            'h_bias': self.h_bias.state_dict(),
-            'v_bias': self.v_bias.state_dict()
+            'W': self.W,
+            'h_bias': self.h_bias,
+            'v_bias': self.v_bias
         }, path)
         
     def load_model(self, path):
@@ -583,6 +647,19 @@ class MARBM(nn.Module):
             - path (str): Path from where to load the model's state.
         """
         checkpoint = torch.load(path)
-        self.W.load_state_dict(checkpoint['W'])
-        self.h_bias.load_state_dict(checkpoint['h_bias'])
-        self.v_bias.load_state_dict(checkpoint['v_bias'])
+        self.W = nn.Parameter(checkpoint['W'])
+        self.h_bias = nn.Parameter(checkpoint['h_bias'])
+        self.v_bias = nn.Parameter(checkpoint['v_bias'])
+
+    def get_visualization_data(self):
+        """
+        Retrieve the data used for visualization.
+
+        Returns:
+        -------
+        tuple:
+            - metrics_name (str): Name of the metrics.
+            - metrics_values (list): A list of metric values collected during training.
+            - sigm_values (list): A list of sigmoid values collected during training.
+        """
+        return self.metrics_name, self.metrics_values, self.sigm_values
