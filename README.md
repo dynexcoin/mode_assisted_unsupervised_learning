@@ -15,9 +15,9 @@ Which generates the following output:
 
 # Mode-Assisted QRBM as Python Class
 
-Can be universally used. MNIST trainging comparison of CD-1 vs. Mode-Assisted: 
+Can be universally used. MNIST trainging comparison of CD-1 vs. Mode-Assisted. While traditional model training (CD) fails to improve at one point (blue line), is the new PyTorch mode-assisted Quantum Boltzmann Machine (QRBM) breaking through that boundary and proving superior capability in pattern reproduction and detailing:
 
-![Figure_8](https://github.com/dynexcoin/mode_assisted_unsupervised_learning/blob/main/Figure_8.jpg))
+![Figure_8](https://github.com/dynexcoin/mode_assisted_unsupervised_learning/blob/main/Figure_8.jpg)
 
 ### References
 [Mode-assisted unsupervised learning of restricted Boltzmann machines](https://arxiv.org/pdf/2001.05559.pdf), Communications Physics volume 3, Article number:105 (2020)
