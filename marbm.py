@@ -4,7 +4,9 @@ from tqdm import tqdm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import DataLoader, TensorDataset
 import logging
+# import dynex
 logging.basicConfig(filename="MARBM.log", level=logging.INFO, format='%(asctime)s [%(levelname)s] - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -40,7 +42,7 @@ class MARBM(nn.Module):
     - rbm2qubo: Convert RBM parameters to a QUBO matrix.
     - train: Train the RBM using mode-assisted training.
     - reconstruct: Reconstruct input data using the trained RBM.
-    - _compute_free_energy: Compute the free energy of a given configuration.
+    - compute_free_energy: Compute the free energy of a given configuration.
     - _mode_train_step: Execute one step of mode-assisted training.
     - _cd_train_step: Execute one step of training using Contrastive Divergence.
     
@@ -68,8 +70,8 @@ class MARBM(nn.Module):
             Bias vector for hidden units, initialized to zeros.
         v_bias : torch.nn.Parameter
             Bias vector for visible units, initialized to zeros.
-        free_energies : list
-            A list to store the free energies during training.
+        metrics : list
+            A list to store (loss) metrics during training.
         """
         # Call the constructor of the parent class (nn.Module)
         super(MARBM, self).__init__()
@@ -90,8 +92,8 @@ class MARBM(nn.Module):
         self.h_bias = nn.Parameter(torch.zeros(hidden_units))
         self.v_bias = nn.Parameter(torch.zeros(visible_units))
         
-        # Initialize the list to store free energies
-        self.free_energies = []
+        # Initialize the list to store (loss) metrics
+        self.metrics = []
 
         # Log the initialization details
         logger.info("Initialized MARBM with visible units: %s, hidden units: %s", visible_units, hidden_units)
@@ -111,7 +113,43 @@ class MARBM(nn.Module):
         h_prob = torch.sigmoid(F.linear(v, self.W, self.h_bias))
         logger.debug("Completed forward pass")
         return h_prob
+    
+    def lock_weights(self):
+        """
+        Lock the weights of the RBM to prevent them from being updated during training.
+        This is useful when utilizing the RBM in transfer learning scenarios, ensuring the 
+        pretrained weights remain unchanged.
+        """
+        for param in self.parameters():
+            param.requires_grad = False
+            
+    def unlock_weights(self):
+        """
+        Unlock the weights of the RBM, allowing them to be updated during training.
+        """
+        for param in self.parameters():
+            param.requires_grad = True
 
+    def extract_features(self, v):
+        """
+        Extract the features from the input using the hidden activations of the RBM.
+        
+        Parameters:
+        - v (torch.Tensor): Input data, corresponding to the visible units.
+
+        Returns:
+        - torch.Tensor: The activations of the hidden units which can be used as features for downstream tasks.
+        
+        Usage:
+            rbm = MARBM(visible_units, hidden_units)
+            rbm.load_model(path)
+            input_data = ...  # Your data for which you wish to extract features
+            features = rbm.extract_features(input_data)
+            # You can now feed this into the subsequent layer of your model
+        """
+        
+        return self.forward(v)
+        
     def sample_hidden(self, v: torch.Tensor) -> torch.Tensor:
         """
         Sample from the hidden layer given the visible layer.
@@ -213,53 +251,103 @@ class MARBM(nn.Module):
         # Populate the off-diagonal entries with weights
         Q[:n_visible, n_visible:] = vishid
         return Q
-        
-    def train(self, train_loader, epochs=10, lr=0.01, k=1, sigm_a=20, sigm_b=-6, p_max=0.1, plotper=100):
+                
+    def extract_data_only_from_batch(self, batch):
         """
-        Trains the MARBM model using given data.
+        Extracts data from a given batch.
+
+        If the batch is a tuple or a list, it extracts the first element. Otherwise, it returns the batch as it is.
 
         Parameters:
-        - train_loader (torch.utils.data.DataLoader): DataLoader containing the training data and labels.
+        - batch (Union[Tuple[torch.Tensor, Any], List[torch.Tensor, Any], torch.Tensor]): Input batch which can be a tuple, list, or a tensor.
+
+        Returns:
+        - torch.Tensor: Extracted data from the batch.
+        """
+        if isinstance(batch, (tuple, list)):
+            data = batch[0]
+        else:
+            data = batch
+        return data
+    
+    def preprocess_to_binary(self, data, threshold=0.5):
+        """
+        Convert the data into binary format based on a given threshold.
+        
+        Parameters:
+        - data (torch.Tensor): Input data tensor.
+        - threshold (float, optional): The threshold for conversion to binary. Default is 0.5.
+        
+        Returns:
+        - binary_data (torch.Tensor): Data converted to binary format.
+        """
+        binary_data = (data > threshold).float()
+        return binary_data  
+        
+    def train(self, train_loader, val_loader=None, epochs=10, lr=0.01, k=1, sigm_a=20, sigm_b=-6, p_max=0.1, plotper=100, loss_metric='free_energy'):
+        """
+        Trains the MARBM model on provided data using the specified parameters.
+
+        Parameters:
+        - train_loader (torch.utils.data.DataLoader): DataLoader for the training dataset.
+        - val_loader (torch.utils.data.DataLoader, optional): DataLoader for the validation dataset. Default is None.
         - epochs (int, optional): Number of training epochs. Default is 10.
-        - lr (float, optional): Learning rate for the optimizer. Default is 0.01.
-        - k (int, optional): Number of Gibbs sampling steps for contrastive divergence. Default is 1.
-        - sigm_a (float, optional): Parameter for the sigmoidal function determining mode switching. Default is 20.
-        - sigm_b (float, optional): Parameter for the sigmoidal function determining mode switching. Default is -6.
-        - p_max (float, optional): Maximum probability for the sigmoidal switch function. Should be in the range (0, 1]. Default is 0.1.
-        - plotper (int, optional): Interval at which free energy is computed and logged. Default is 100.
+        - lr (float, optional): Learning rate for optimization. Default is 0.01.
+        - k (int, optional): Number of Gibbs sampling steps used in contrastive divergence. Default is 1.
+        - sigm_a (float, optional): Coefficient for the sigmoidal function determining mode switching. Default is 20.
+        - sigm_b (float, optional): Bias for the sigmoidal function determining mode switching. Default is -6.
+        - p_max (float, optional): Upper limit for the probability of the sigmoidal switch function. Must be within (0, 1]. Default is 0.1.
+        - plotper (int, optional): Frequency for calculating and logging the free energy. Default is 100.
+        - loss_metric (str, optional): Metric for loss computation. Accepts 'free_energy' or 'kl_loss'. Default is 'free_energy'.
 
         Notes:
-        The training process alternates between mode training and contrastive divergence based on a stochastic switch.
-        The free energy of the model is computed and stored at intervals defined by the `plotper` argument.
+        Training alternates between mode-based training and contrastive divergence based on stochastic switching. 
+        The probability of selecting mode-based training at each step is given by the sigmoid function 
+        'sigm = p_max / (1 + np.exp( -sigm_a * (iter_idx + epoch * steps_per_epoch) / total_steps - sigm_b))'. 
+        The sigmoid function ensures that as training progresses, especially in the later epochs, there's 
+        an increased likelihood of using mode-based training. This is useful as mode training in the 
+        later steps helps the model converge more effectively. 
+        Free energy or KL loss is periodically computed and stored based on the `plotper` interval.
+        
         """
-
-        assert lr > 0, "Learning rate (lr) should be positive."
-        assert sigm_a > 0, "sigm_a should be positive."
-        assert 0 <= p_max <= 1, "p_max should be in the range (0, 1]."
+        
+        lr = float(lr)
+        sigm_a = float(sigm_a)
+        sigm_b = float(sigm_b)
+        p_max = float(p_max)
+        
+        assert isinstance(train_loader, torch.utils.data.DataLoader), "train_loader should be of type torch.utils.data.DataLoader"
+        assert val_loader is None or isinstance(val_loader, torch.utils.data.DataLoader), "val_loader should be either None or of type torch.utils.data.DataLoader"
+        assert isinstance(epochs, int) and epochs > 0, "epochs should be a positive integer"
+        assert isinstance(lr, float) and lr > 0, "lr should be a positive float"
+        assert isinstance(k, int) and k > 0, "k should be a positive integer"
+        assert isinstance(sigm_a, float) and sigm_a > 0, "sigm_a should be a positive float"
+        assert isinstance(sigm_b, float), "sigm_b should be a float"
+        assert isinstance(p_max, float) and 0 <= p_max <= 1, "p_max should be a float in the range (0, 1]"
+        assert isinstance(plotper, int) and plotper > 0, "plotper should be a positive integer"
+        assert isinstance(loss_metric, str) and loss_metric in ['free_energy', 'kl_loss'], "loss_metric should be a string and either 'free_energy' or 'kl_loss'"
         
         optimizer = torch.optim.SGD(self.parameters(), lr=lr)
 
         steps_per_epoch = len(train_loader)
         total_steps = steps_per_epoch * epochs
+        
         logger.info("Total training steps: %s", total_steps)
-
         logger.info("Training started for %s epochs", epochs)
         
         for epoch in range(epochs):
             logger.info("Epoch %s started", epoch+1)
-            for iter_idx, (data, _) in tqdm(enumerate(train_loader), desc=f"Epoch {epoch+1}/{epochs} Training Progress", ncols=100, total=len(train_loader)):
+            for iter_idx, batch in tqdm(enumerate(train_loader), desc=f"Epoch {epoch+1}/{epochs} Training Progress", ncols=100, total=len(train_loader)):
                 
-                sigm = p_max / (1 + np.exp(-sigm_a * (iter_idx + epoch * steps_per_epoch) / total_steps - sigm_b))
-                if torch.rand(1) <= sigm:
-                    self._mode_train_step(data, optimizer, lr)
-                else:
-                    self._cd_train_step(data, optimizer, lr, k)
+                data = self.extract_data_only_from_batch(batch)
+                data = self.preprocess_to_binary(data)
                 
-                # Calculate free energy every 'plotper' steps
+                sigm = p_max / (1 + np.exp( -sigm_a * (iter_idx + epoch * steps_per_epoch) / total_steps - sigm_b))
+                self._mode_train_step(data, optimizer, lr) if torch.rand(1) <= sigm else self._cd_train_step(data, optimizer, lr, k)
+                
+                # Calculate metric every 'plotper' steps
                 if iter_idx % plotper == 0:
-                    with torch.no_grad():
-                        free_energy = self._compute_free_energy(data).mean().item()
-                        self.free_energies.append(free_energy)
+                    self.compute_and_log_metric(val_loader, data, loss_metric)
 
         logger.info("Training completed")
         
@@ -273,6 +361,7 @@ class MARBM(nn.Module):
         - ground_state_energy (float): Energy of the sampled ground state.
         """
         Q = self.rbm2qubo()
+        # bqm = dimod.BinaryQuadraticModel.from_qubo(Q, offset)
         simulated_annealing_parameters = {
             'beta_range': [0.1, 1.0],
             'num_reads': 2,
@@ -280,6 +369,12 @@ class MARBM(nn.Module):
         }
         sampler = dimod.SimulatedAnnealingSampler()
         response = sampler.sample_qubo(-Q, **simulated_annealing_parameters)
+        
+        # model = dynex.BQM(bqm);
+        # sampler = dynex.DynexSampler(model,  mainnet=True, description='Dynex SDK test');
+        # sampleset = sampler.sample(num_reads=32, annealing_time = 64, debugging=False);
+        # print('Result:',sampleset)
+        
         ground_state = response.first.sample
         ground_state_energy = response.first.energy
 
@@ -378,7 +473,7 @@ class MARBM(nn.Module):
         logger.debug("Reconstructed input data with shape: %s", str(v.shape))
         return v
 
-    def _compute_free_energy(self, v: torch.Tensor) -> torch.Tensor:
+    def compute_free_energy(self, v: torch.Tensor) -> torch.Tensor:
         """
         Compute the free energy of a given configuration.
 
@@ -396,6 +491,76 @@ class MARBM(nn.Module):
         term_2 = torch.sum(F.softplus(wx_b), dim=1)
         logger.debug("Computed free energy for a configuration")
         return -term_1 - term_2
+    
+    def compute_kl_divergence(self, data: torch.Tensor) -> torch.Tensor:
+        """
+        Compute the KL divergence between the original data and its reconstruction.
+
+        Parameters:
+        ----------
+        data (torch.Tensor): Original input data, of shape [batch_size, visible_units].
+
+        Returns:
+        -------
+        torch.Tensor: KL Divergence between the original data and its reconstruction.
+        """
+        reconstructed_data_probabilities = self.reconstruct(data)
+        return self.kl_divergence(data, reconstructed_data_probabilities)
+    
+    def compute_and_log_metric(self, val_loader, data, loss_metric):
+        """
+        Computes and logs the specified metric using provided data.
+        
+        Parameters:
+        - val_loader (torch.utils.data.DataLoader): DataLoader for the validation dataset.
+        - data (torch.Tensor): Input data tensor.
+        - loss_metric (str): The loss metric to compute. Can be 'free_energy' or 'kl_loss'.
+        
+        Returns:
+        - metric_value (float): Computed metric value.
+        """
+        with torch.no_grad():
+            if val_loader:
+                data_for_metric = next(iter(val_loader))
+                data_for_metric = self.extract_data_only_from_batch(data_for_metric)
+            else:
+                data_for_metric = data
+
+            if loss_metric == 'free_energy':
+                metric_value = self.compute_free_energy(data_for_metric).mean().item()
+            elif loss_metric == 'kl_loss':
+                metric_value = self.compute_kl_divergence(data_for_metric).mean().item()
+            else:
+                raise ValueError(f"Invalid loss_metric: {loss_metric}. Expected 'free_energy' or 'kl_loss'.")
+            
+            self.metrics.append(metric_value)
+            
+    def kl_divergence(self, p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+        """
+        Compute the Kullback-Leibler (KL) Divergence between two probability distributions.
+
+        Parameters:
+        ----------
+        p (torch.Tensor): True probability distribution, of shape [batch_size, visible_units].
+        q (torch.Tensor): Approximated probability distribution, of shape [batch_size, visible_units].
+
+        Returns:
+        -------
+        torch.Tensor: KL Divergence between p and q.
+
+        Note:
+        -----
+        Ensure that both p and q are proper probability distributions, i.e., they both sum up to 1
+        and do not contain any negative values. If they do not sum up to 1, consider normalizing them.
+        """
+        # Adding a small value to prevent log(0) and division by zero issues
+        epsilon = 1e-10
+        p = p + epsilon
+        q = q + epsilon
+
+        # KL Divergence computation
+        kl = p * (torch.log(p) - torch.log(q))
+        return torch.sum(kl, dim=-1)
         
     def save_model(self, path):
         """
