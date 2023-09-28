@@ -17,7 +17,7 @@ Which generates the following output:
 
 Which generates the following output:
 
-![Figure_8]([https://github.com/dynexcoin/mode_assisted_unsupervised_learning/blob/main/figure_8.png](https://github.com/dynexcoin/mode_assisted_unsupervised_learning/blob/main/Figure_8.png))
+![Figure_8](https://github.com/dynexcoin/mode_assisted_unsupervised_learning/blob/main/Figure_8.jpg))
 
 ### References
 [Mode-assisted unsupervised learning of restricted Boltzmann machines](https://arxiv.org/pdf/2001.05559.pdf), Communications Physics volume 3, Article number:105 (2020)
