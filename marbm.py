@@ -1,8 +1,6 @@
 import os
 import numpy as np
-np.random.seed(42)
 import torch
-torch.manual_seed(42)
 import dimod
 from tqdm import tqdm
 import torch.nn as nn
@@ -51,7 +49,7 @@ class MARBM(nn.Module):
     
     """
     
-    def __init__(self, visible_units: int, hidden_units: int, sampler: str = 'SA'):
+    def __init__(self, visible_units: int, hidden_units: int, sampler: str = 'SA', seed: int = None):
         """
         Initializes the Mode-Assisted Restricted Boltzmann Machine (MARBM).
 
@@ -132,6 +130,12 @@ class MARBM(nn.Module):
         if self.sampler == 'DYNEX':
             import dynex
         
+        if seed is not None:
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+
         # Log the initialization details
         logger.info("Initialized MARBM with visible units: %s, hidden units: %s", visible_units, hidden_units)
 
