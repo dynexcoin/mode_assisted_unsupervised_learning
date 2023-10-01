@@ -1,9 +1,13 @@
 import matplotlib.pyplot as plt
+import numpy as np
+np.random.seed(42)
 import torch
+torch.manual_seed(42)
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from torch.utils.data import random_split
 from marbm import MARBM
+
 
 def plot_visualization_data(rbm_cd, rbm_mode):
     # Get visualization data from RBMs
@@ -74,12 +78,14 @@ def main():
     batch_size = 8
     visible_units = 20 * 20
     hidden_units = 20
-    epochs = 1
+    epochs = 4
     lr = 0.1
     k = 1
     sigm_a=20
     sigm_b=-6
+    p_max=0.002
     plotper=1000
+    
     
     transform = transforms.Compose([
         transforms.Resize((20, 20)),
@@ -101,7 +107,7 @@ def main():
     rbm_cd.train(train_loader, val_loader=val_loader, epochs=epochs, lr=lr, k=k, sigm_a=sigm_a, sigm_b=sigm_b, p_max=0.0, plotper=plotper, loss_metric='free_energy')
     
     rbm_mode = MARBM(visible_units, hidden_units)
-    rbm_mode.train(train_loader, val_loader=val_loader, epochs=epochs, lr=lr, k=k, sigm_a=sigm_a, sigm_b=sigm_b, p_max=0.1, plotper=plotper, loss_metric='free_energy')
+    rbm_mode.train(train_loader, val_loader=val_loader, epochs=epochs, lr=lr, k=k, sigm_a=sigm_a, sigm_b=sigm_b, p_max=p_max, plotper=plotper, loss_metric='free_energy')
     
     sample_val_data = next(iter(val_loader))[0]
     

@@ -1,8 +1,10 @@
 import os
 import numpy as np
+np.random.seed(42)
+import torch
+torch.manual_seed(42)
 import dimod
 from tqdm import tqdm
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
@@ -357,7 +359,6 @@ class MARBM(nn.Module):
         assert isinstance(sigm_b, float), "sigm_b should be a float"
         assert isinstance(p_max, float) and 0 <= p_max <= 1, "p_max should be a float in the range (0, 1]"
         assert isinstance(plotper, int) and plotper > 0, "plotper should be a positive integer"
-        assert isinstance(loss_metric, str) and loss_metric in ['free_energy', 'kl', 'mse'], "loss_metric should be a string and one of ['free_energy', 'kl', 'mse']"
 
         
         optimizer = torch.optim.SGD(self.parameters(), lr=lr)
@@ -408,7 +409,7 @@ class MARBM(nn.Module):
         # bqm = dimod.BinaryQuadraticModel.from_qubo(Q, offset=0.0)
         simulated_annealing_parameters = {
             'beta_range': [0.1, 1.0],
-            'num_reads': 2,
+            'num_reads': 4,
             'num_sweeps': 25
         }
         sampler = dimod.SimulatedAnnealingSampler()
@@ -549,8 +550,13 @@ class MARBM(nn.Module):
         torch.Tensor: KL Divergence between the original data and its reconstruction.
         """
         reconstructed_data_probabilities = self.reconstruct(data)
-        return self.kl_divergence(data, reconstructed_data_probabilities)
         
+        # Apply softmax to turn data and reconstruction into probability distributions
+        data_probabilities = F.softmax(data, dim=-1)
+        reconstructed_data_probabilities = F.softmax(reconstructed_data_probabilities, dim=-1)
+        
+        return self.kl_divergence(data_probabilities, reconstructed_data_probabilities)  
+
     def compute_mse(self, data: torch.Tensor) -> torch.Tensor:
         """
         Compute the Mean Squared Error (MSE) between the original data and its reconstruction.
@@ -566,6 +572,104 @@ class MARBM(nn.Module):
         reconstructed_data = self.reconstruct(data)
         mse_loss = torch.nn.functional.mse_loss(reconstructed_data, data, reduction='mean')
         return mse_loss
+    
+    def compute_mae(self, data: torch.Tensor) -> torch.Tensor:
+        """
+        Compute the Mean Absolute Error (MAE) between the original data and its reconstruction.
+
+        Parameters:
+        ----------
+        data (torch.Tensor): Original input data, of shape [batch_size, visible_units].
+
+        Returns:
+        -------
+        torch.Tensor: Mean Absolute Error between the original data and its reconstruction.
+        """
+        reconstructed_data = self.reconstruct(data)
+        mae_loss = torch.nn.functional.l1_loss(reconstructed_data, data, reduction='mean')
+        return mae_loss
+    
+    def compute_ssim(self, data: torch.Tensor, image_shape: tuple) -> torch.Tensor:
+        """
+        Compute the Structural Similarity Index Measure (SSIM) loss between the original flattened 
+        grayscale data and its reconstruction.
+
+        Parameters:
+        ----------
+        data (torch.Tensor): Original input flattened data, of shape [batch_size, visible_units].
+        image_shape (tuple): The shape (height, width) of the original images before flattening.
+
+        Returns:
+        -------
+        torch.Tensor: SSIM loss between the original data and its reconstruction.
+        """
+        # Reshape the data
+        data_2d = data.view(data.size(0), 1, image_shape[0], image_shape[1])
+        reconstructed_data = self.reconstruct(data)
+        reconstructed_data_2d = reconstructed_data.view(reconstructed_data.size(0), 1, image_shape[0], image_shape[1])
+
+        ssim_value = self._ssim(data_2d, reconstructed_data_2d)
+        return 1 - ssim_value  # SSIM loss
+    
+    def _ssim(self, x: torch.Tensor, y: torch.Tensor, window_size: int = 11, 
+              sigma: float = 1.5, C1: float = 0.01**2, C2: float = 0.03**2) -> torch.Tensor:
+        """
+        Compute the SSIM between two images.
+        
+        Parameters:
+        ----------
+        x, y (torch.Tensor): Images to compare, of shape [batch_size, channels, height, width].
+        window_size (int): Size of the Gaussian window used to compute local statistics.
+        sigma (float): Standard deviation of the Gaussian window.
+        C1, C2 (float): Constants to stabilize division with a weak denominator.
+        
+        Returns:
+        -------
+        torch.Tensor: SSIM between x and y.
+        """
+        # Create a Gaussian window
+        window = self._create_gaussian_window(window_size, x.size(1), sigma)
+        window = window.to(x.device)
+        
+        # Compute local means
+        mu_x = F.conv2d(x, window, padding=window_size//2, groups=x.size(1))
+        mu_y = F.conv2d(y, window, padding=window_size//2, groups=y.size(1))
+        
+        mu_x_sq = mu_x.pow(2)
+        mu_y_sq = mu_y.pow(2)
+        mu_xy = mu_x * mu_y
+        
+        # Compute local variances
+        sigma_x_sq = F.conv2d(x*x, window, padding=window_size//2, groups=x.size(1)) - mu_x_sq
+        sigma_y_sq = F.conv2d(y*y, window, padding=window_size//2, groups=y.size(1)) - mu_y_sq
+        sigma_xy = F.conv2d(x*y, window, padding=window_size//2, groups=x.size(1)) - mu_xy
+        
+        # Compute SSIM
+        ssim_map = ((2*mu_xy + C1) * (2*sigma_xy + C2)) / ((mu_x_sq + mu_y_sq + C1) * (sigma_x_sq + sigma_y_sq + C2))
+        return ssim_map.mean()
+    
+    def _create_gaussian_window(self, window_size: int, channels: int, sigma: float) -> torch.Tensor:
+        """
+        Create a Gaussian window for SSIM computation.
+        
+        Parameters:
+        ----------
+        window_size (int): Size of the Gaussian window.
+        channels (int): Number of channels of the images.
+        sigma (float): Standard deviation of the Gaussian window.
+        
+        Returns:
+        -------
+        torch.Tensor: The Gaussian window, of shape [channels, 1, window_size, window_size].
+        """
+        coords = torch.arange(window_size, dtype=torch.float) - window_size // 2
+        g = torch.exp(-(coords**2) / (2*sigma**2))
+        g /= g.sum()
+        
+        # Create a Gaussian window using outer product
+        window = g.unsqueeze(1) * g.unsqueeze(0)
+        window = window.float().unsqueeze(0).unsqueeze(0)
+        return window.repeat(channels, 1, 1, 1)
 
     def compute_and_log_metric(self, val_loader, data, loss_metric, sigm):
         """
@@ -574,11 +678,14 @@ class MARBM(nn.Module):
         Parameters:
         - val_loader (torch.utils.data.DataLoader): DataLoader for the validation dataset.
         - data (torch.Tensor): Input data tensor.
-        - loss_metric (str): The loss metric to compute. Can be 'free_energy' or 'kl_loss'.
+        - loss_metric (str): The loss metric to compute. Can be 'free_energy', 'kl', 'mse', 'mae', or 'ssim'.
         
         Returns:
         - metric_value (float): Computed metric value.
         """
+        assert loss_metric in ['free_energy', 'kl', 'mse', 'mae', 'ssim'], \
+               "loss_metric should be one of ['free_energy', 'kl', 'mse', 'mae', 'ssim']."
+        
         with torch.no_grad():
             if val_loader:
                 data_for_metric = next(iter(val_loader))
@@ -588,17 +695,20 @@ class MARBM(nn.Module):
 
             if loss_metric == 'free_energy':
                 metric_value = self.compute_free_energy(data_for_metric).mean().item()
-            elif loss_metric == 'kl_loss':
+            elif loss_metric == 'kl':
                 metric_value = self.compute_kl_divergence(data_for_metric).mean().item()
             elif loss_metric == 'mse':
                 metric_value = self.compute_mse(data_for_metric).item()
-
+            elif loss_metric == 'mae':
+                metric_value = self.compute_mae(data_for_metric).item()
+            elif loss_metric == 'ssim':
+                metric_value = self.compute_ssim(data_for_metric, (28, 28)).item()
             else:
-                raise ValueError(f"Invalid loss_metric: {loss_metric}. Expected 'free_energy' or 'kl_loss'.")
+                raise ValueError(f"Invalid loss_metric: {loss_metric}. Expected 'free_energy', 'kl', 'mse', 'mae', or 'ssim'.")
             
             self.metrics_values.append(metric_value)
             self.sigm_values.append(sigm)
-            
+
     def kl_divergence(self, p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
         """
         Compute the Kullback-Leibler (KL) Divergence between two probability distributions.
