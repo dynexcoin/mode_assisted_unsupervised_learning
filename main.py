@@ -78,7 +78,7 @@ def main():
     batch_size = 8
     visible_units = 20 * 20
     hidden_units = 20
-    epochs = 4
+    epochs = 10
     lr = 0.1
     k = 1
     sigm_a=20

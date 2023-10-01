@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 import logging
-# import dynex
+
 logging.basicConfig(filename="MARBM.log", level=logging.INFO, format='%(asctime)s [%(levelname)s] - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ class MARBM(nn.Module):
     
     """
     
-    def __init__(self, visible_units: int, hidden_units: int):
+    def __init__(self, visible_units: int, hidden_units: int, sampler: str = 'SA'):
         """
         Initializes the Mode-Assisted Restricted Boltzmann Machine (MARBM).
 
@@ -64,7 +64,10 @@ class MARBM(nn.Module):
         hidden_units : int
             Number of hidden units. Represents the latent dimensionality or feature detectors.
             Must be a positive integer.
-
+            
+        sampler : str
+            Name of the sampling method used during training. Options: 'SA' (Simulated Annealing) or 'DYNEX' (Dynex Sampler).
+        
         Attributes:
         -----------
         visible_units : int
@@ -122,7 +125,13 @@ class MARBM(nn.Module):
         self.metrics_name = ''
         self.metrics_values  = []
         self.sigm_values = []
-
+        
+        # Import dynex if sampler set to be 'DYNEX'
+        self.sampler = sampler
+        assert self.sampler in ['SA', 'DYNEX'], "sampler should be either 'SA' or 'DYNEX'"
+        if self.sampler == 'DYNEX':
+            import dynex
+        
         # Log the initialization details
         logger.info("Initialized MARBM with visible units: %s, hidden units: %s", visible_units, hidden_units)
 
@@ -405,20 +414,21 @@ class MARBM(nn.Module):
         - mode_h (np.array): Hidden units' state of the sampled mode.
         - ground_state_energy (float): Energy of the sampled ground state.
         """
-        Q = self.rbm2qubo()
-        # bqm = dimod.BinaryQuadraticModel.from_qubo(Q, offset=0.0)
-        simulated_annealing_parameters = {
-            'beta_range': [0.1, 1.0],
-            'num_reads': 4,
-            'num_sweeps': 25
-        }
-        sampler = dimod.SimulatedAnnealingSampler()
-        response = sampler.sample_qubo(-Q, **simulated_annealing_parameters)
-        
-        # model = dynex.BQM(bqm);
-        # sampler = dynex.DynexSampler(model,  mainnet=True, description='Dynex SDK test');
-        # sampleset = sampler.sample(num_reads=32, annealing_time = 64, debugging=False);
-        # print('Result:',sampleset)
+        if self.sampler == 'SA':
+            Q = self.rbm2qubo()
+            simulated_annealing_parameters = {
+                'beta_range': [0.1, 1.0],
+                'num_reads': 4,
+                'num_sweeps': 25
+            }
+            sampler = dimod.SimulatedAnnealingSampler()
+            response = sampler.sample_qubo(-Q, **simulated_annealing_parameters)
+        else:
+            # Sample with Dynex:
+            bqm = dimod.BinaryQuadraticModel.from_qubo(-Q, 0.0)
+            model = dynex.BQM(bqm, logging=False)
+            sampler = dynex.DynexSampler(model,  mainnet=False, logging=False, description='Dynex SDK test')
+            response = sampler.sample(num_reads=5000, annealing_time = 300, debugging=False)
         
         ground_state = response.first.sample
         ground_state_energy = response.first.energy
