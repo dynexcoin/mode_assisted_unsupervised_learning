@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 import logging
-
+# import dynex
 logging.basicConfig(filename="MARBM.log", level=logging.INFO, format='%(asctime)s [%(levelname)s] - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -51,93 +51,130 @@ class MARBM(nn.Module):
     
     def __init__(self, visible_units: int, hidden_units: int, sampler: str = 'SA', seed: int = None):
         """
-        Initializes the Mode-Assisted Restricted Boltzmann Machine (MARBM).
-
-        Parameters:
+        Initialize the Mode-Assisted Restricted Boltzmann Machine (MARBM).
+        
+        Parameters
         ----------
         visible_units : int
-            Number of visible units. Represents the dimensionality of the data input.
-            Must be a positive integer.
-
+            Number of visible units, representing the dimensionality of the data input.
         hidden_units : int
-            Number of hidden units. Represents the latent dimensionality or feature detectors.
-            Must be a positive integer.
-            
-        sampler : str
-            Name of the sampling method used during training. Options: 'SA' (Simulated Annealing) or 'DYNEX' (Dynex Sampler).
+            Number of hidden units, representing the latent dimensionality or feature detectors.
+        sampler : str, optional
+            Sampling method used during training. Options: 'SA' (Simulated Annealing) or 'DYNEX' (Dynex Sampler). 
+            Default is 'SA'.
+        seed : int, optional
+            Random seed for reproducibility. If provided, it sets the seeds for both torch and numpy.
         
-        Attributes:
-        -----------
+        Attributes
+        ----------
         visible_units : int
-            Number of visible units in the RBM. Represents the data input's dimensionality.
-
+            Dimensionality of data input.
         hidden_units : int
-            Number of hidden units in the RBM. Represents the latent features or representations.
-
+            Latent features or representations.
         W : torch.nn.Parameter
-            Weight matrix, connecting visible to hidden units. It's initialized with small random values
-            to break the symmetry during training.
-
+            Weight matrix connecting visible to hidden units.
         h_bias : torch.nn.Parameter
-            Bias vector for the hidden units. Initialized to zeros.
-
+            Bias for hidden units.
         v_bias : torch.nn.Parameter
-            Bias vector for the visible units. Initialized to zeros.
-
+            Bias for visible units.
         metrics_name : str
-            Name of the metric(s) used during training. Useful for visualization and interpretation.
-
+            Metric(s) name used during training.
         metrics_values : list
-            List storing metric values collected during training for visualization.
-
+            Metric values during training.
         sigm_values : list
-            List storing sigmoid values collected during training for understanding the switching dynamics.
-
-        Notes:
-        ------
-        The MARBM class represents a Mode-Assisted Restricted Boltzmann Machine, which is an
-        unsupervised neural network model for learning representations. This class specifically 
-        includes provisions for capturing and visualizing training dynamics, which aids in 
-        interpreting the training process.
+            Sigmoid values during training.
+        
+        Notes
+        -----
+        The MARBM class encapsulates a Mode-Assisted Restricted Boltzmann Machine, an unsupervised 
+        neural network model tailored for learning representations. It includes features for tracking 
+        and visualizing training dynamics, enhancing interpretability.
         """
-        # Call the constructor of the parent class (nn.Module)
+        
+        # Initialize parent class
         super(MARBM, self).__init__()
 
-        # Check the validity of the input parameters
+        # Validate inputs
         assert isinstance(visible_units, int) and visible_units > 0, "visible_units should be a positive integer."
         assert isinstance(hidden_units, int) and hidden_units > 0, "hidden_units should be a positive integer."
         
-        # Initialization of the number of visible and hidden units
+        # Initialize visible and hidden units
         self.visible_units = visible_units
         self.hidden_units = hidden_units
 
-        # Initialization of weights and biases
-        # Note: Weights are initialized with small random values to break the symmetry during training
+        # Initialize weights with small random values for symmetry breaking
         self.W = nn.Parameter(torch.randn(hidden_units, visible_units) * 0.01)
         
-        # Note: Biases are initialized to zeros as a common practice in RBM training
+        # Initialize biases to zero, a common practice in RBMs
         self.h_bias = nn.Parameter(torch.zeros(hidden_units))
         self.v_bias = nn.Parameter(torch.zeros(visible_units))
         
-        # Store data for visualization
+        # Data structures for visualization and analysis
         self.metrics_name = ''
         self.metrics_values  = []
         self.sigm_values = []
         
-        # Import dynex if sampler set to be 'DYNEX'
+        # Set the sampler and validate its type
         self.sampler = sampler
         assert self.sampler in ['SA', 'DYNEX'], "sampler should be either 'SA' or 'DYNEX'"
-        if self.sampler == 'DYNEX':
-            import dynex
         
+        # Sampler parameters
+        if self.sampler == 'DYNEX':
+            self.num_reads = 5000
+            self.annealing_time = 300
+        else:
+            self.num_reads = 25
+            self.annealing_time = 4
+        self.debugging = False
+        self.mainnet = False
+        self.logging = False
+            
+        # Set seeds for reproducibility if provided
         if seed is not None:
             torch.manual_seed(seed)
             np.random.seed(seed)
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
 
-        # Log the initialization details
-        logger.info("Initialized MARBM with visible units: %s, hidden units: %s", visible_units, hidden_units)
+        # Log the initialization
+        logger.info(f"Initialized MARBM with visible units: {visible_units}, hidden units: {hidden_units}")
+    
+    def set_sampler_parameters(self, num_reads=None, annealing_time=None, debugging=None, mainnet=None, logging=None):
+        """
+        Set sampler parameters for the RBM.
+
+        Parameters
+        ----------
+        num_reads : int, optional
+            Number of reads for the sampler. If not provided, the existing value remains unchanged.
+        annealing_time : float, optional
+            Annealing time for the sampler. If not provided, the existing value remains unchanged.
+        debugging : bool, optional
+            Debugging mode flag. If not provided, the existing value remains unchanged.
+        mainnet : bool, optional
+            Flag to determine if the Dynex online computing service should be accessed. If not provided, the existing value remains unchanged.
+        logging : bool, optional
+            Logging mode flag. If not provided, the existing value remains unchanged.
+
+        Notes
+        -----
+        This method updates the sampler parameters for the RBM based on the provided values.
+        """
+        
+        if num_reads is not None:
+            self.num_reads = num_reads
+
+        if annealing_time is not None:
+            self.annealing_time = annealing_time
+
+        if debugging is not None:
+            self.debugging = debugging
+
+        if mainnet is not None:
+            self.mainnet = mainnet
+
+        if logging is not None:
+            self.logging = logging
 
     def forward(self, v: torch.Tensor) -> torch.Tensor:
         """
@@ -411,37 +448,56 @@ class MARBM(nn.Module):
         
     def _mode_sampling(self):
         """
-        Uses simulated annealing to sample the mode (ground state) of the RBM encoded as a QUBO.
+        Sample the mode (ground state) of the RBM encoded as a QUBO using simulated annealing.
 
-        Returns:
-        - mode_v (np.array): Visible units' state of the sampled mode.
-        - mode_h (np.array): Hidden units' state of the sampled mode.
-        - ground_state_energy (float): Energy of the sampled ground state.
+        Returns
+        -------
+        mode_v : np.array
+            State of the visible units of the sampled mode.
+        mode_h : np.array
+            State of the hidden units of the sampled mode.
+        ground_state_energy : float
+            Energy of the sampled ground state.
+
+        Notes
+        -----
+        This method supports two sampling methods: 'SA' (Simulated Annealing) and 'Dynex'.
         """
+        
+        # Convert the RBM to QUBO format
+        Q = self.rbm2qubo()
+
         if self.sampler == 'SA':
-            Q = self.rbm2qubo()
+            # Simulated Annealing parameters
             simulated_annealing_parameters = {
                 'beta_range': [0.1, 1.0],
-                'num_reads': 4,
-                'num_sweeps': 25
+                'num_reads': self.num_reads,
+                'num_sweeps': self.annealing_time
             }
+
+            # Initialize and sample using the Simulated Annealing sampler
             sampler = dimod.SimulatedAnnealingSampler()
             response = sampler.sample_qubo(-Q, **simulated_annealing_parameters)
+
         else:
-            # Sample with Dynex:
+            # Convert QUBO to BQM format for Dynex sampling
             bqm = dimod.BinaryQuadraticModel.from_qubo(-Q, 0.0)
             model = dynex.BQM(bqm, logging=False)
-            sampler = dynex.DynexSampler(model,  mainnet=False, logging=False, description='Dynex SDK test')
-            response = sampler.sample(num_reads=5000, annealing_time = 300, debugging=False)
+
+            # Initialize and sample using the Dynex sampler
+            sampler = dynex.DynexSampler(model, mainnet=self.mainnet, logging=self.logging, description='Dynex SDK test')
+            response = sampler.sample(num_reads=self.num_reads, annealing_time=self.annealing_time, debugging=self.debugging)
         
+        # Extract the ground state and its energy
         ground_state = response.first.sample
         ground_state_energy = response.first.energy
 
+        # Split the state into visible and hidden units
         mode_v = np.array([ground_state[i] for i in range(self.visible_units)]).reshape(1, -1)
         mode_h = np.array([ground_state[i] for i in range(self.visible_units, self.visible_units + self.hidden_units)]).reshape(1, -1)
         
         return mode_v, mode_h, ground_state_energy
-    
+ 
     def _mode_train_step(self, input_data, optimizer, lr):
         """
         Performs a training step using mode-guided training for the RBM.
